@@ -479,6 +479,20 @@ input[type=range]{width:100%;accent-color:var(--accent);height:28px;margin:0}
   </section>
 
   <section class="group">
+    <h2>Suono</h2>
+    <div class="list">
+      <div class="list-row"><label for="setTone" class="row-txt">Suono della chitarra<small>Per scale, accordi ed esercizi</small></label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <div class="select sm" style="width:150px"><select id="setTone">
+            <option value="clean">Elettrica pulita</option><option value="crunch">Elettrica crunch</option><option value="dist">Elettrica distorta</option><option value="acoustic">Acustica</option>
+          </select></div>
+          <button class="round" id="toneTry" aria-label="Prova il suono" style="width:44px;height:44px"></button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="group">
     <h2>Aspetto</h2>
     <div class="list">
       <div class="list-row"><label for="setTheme" class="row-txt">Tema</label><div class="select sm" style="width:140px"><select id="setTheme">
@@ -500,7 +514,7 @@ input[type=range]{width:100%;accent-color:var(--accent);height:28px;margin:0}
   <section class="group">
     <h2>Info</h2>
     <div class="list">
-      <div class="list-row"><span class="row-txt">Plettro<small>Versione 1.2 · si aggiorna da sola e funziona anche offline</small></span></div>
+      <div class="list-row"><span class="row-txt">Plettro<small>Versione 1.3 · si aggiorna da sola e funziona anche offline</small></span></div>
     </div>
   </section>
 </section>
@@ -535,7 +549,7 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
 };
 const DEFAULTS = { tuning: 'standard', refA: 440, sens: 50, vibrate: true, theme: 'dark', accent: 'lime', notation: 'en',
-  level: 0, chA: 'G', chB: 'C', chDur: 60, bpm: 96, sig: '4/4', scaleKey: 9, scaleType: 'pmin', earMode: 'mm', lang: 'auto' };
+  level: 0, chA: 'G', chB: 'C', chDur: 60, bpm: 96, sig: '4/4', scaleKey: 9, scaleType: 'pmin', earMode: 'mm', lang: 'auto', tone: 'crunch' };
 const S = Object.assign({}, DEFAULTS, store.get('plettro.settings', {}));
 const save = () => store.set('plettro.settings', S);
 
@@ -864,7 +878,9 @@ const EN = {
   'Sensibilità microfono': 'Microphone sensitivity', 'Vibrazione quando intonato': 'Vibrate when in tune',
   'Solo sui telefoni che la supportano': 'Only on phones that support it', 'Aspetto': 'Appearance', 'Tema': 'Theme', 'Scuro': 'Dark',
   'Chiaro': 'Light', 'Automatico': 'Automatic', 'Automatica': 'Automatic', 'Colore': 'Color', 'Nomi delle note': 'Note names', 'Lingua': 'Language',
-  'Info': 'About', 'Versione 1.2 · si aggiorna da sola e funziona anche offline': 'Version 1.2 · updates itself and works offline',
+  'Info': 'About', 'Versione 1.3 · si aggiorna da sola e funziona anche offline': 'Version 1.3 · updates itself and works offline',
+  'Suono': 'Sound', 'Suono della chitarra': 'Guitar sound', 'Per scale, accordi ed esercizi': 'For scales, chords and exercises',
+  'Elettrica pulita': 'Electric clean', 'Elettrica crunch': 'Electric crunch', 'Elettrica distorta': 'Electric distorted', 'Acustica': 'Acoustic', 'Prova il suono': 'Try the sound',
   'Navigazione principale': 'Main navigation', 'È disponibile una nuova versione': 'A new version is available', 'Aggiorna': 'Update',
   'Chiudi avviso': 'Close', 'Durata ': 'Duration',
   'Microfono non disponibile: apri l\'app da un indirizzo https.': 'Microphone unavailable: open the app from an https address.',
@@ -989,28 +1005,68 @@ function toast(msg) {
 }
 
 /* ---------------- Audio ---------------- */
+/* Amplificatore virtuale: le note della chitarra passano da qui (gli altri suoni no) */
+const AMPS = {
+  clean:  { drive: 1.4, post: 0.55, mid: 1, high: 2, cab: 6500 },
+  crunch: { drive: 5, post: 0.42, mid: 3, high: 1, cab: 5000 },
+  dist:   { drive: 22, post: 0.28, mid: -3, high: 2, cab: 4200 }
+};
 const AE = {
-  ctx: null, master: null,
+  ctx: null, master: null, guitar: null, amp: null,
   get() {
     if (!this.ctx) {
       const C = window.AudioContext || window.webkitAudioContext;
       if (!C) return null;
-      this.ctx = new C({ latencyHint: 'interactive' });
-      const comp = this.ctx.createDynamicsCompressor();
+      const ctx = this.ctx = new C({ latencyHint: 'interactive' });
+      const comp = ctx.createDynamicsCompressor();
       comp.threshold.value = -14; comp.ratio.value = 4;
-      this.master = this.ctx.createGain();
+      this.master = ctx.createGain();
       this.master.gain.value = 0.9;
       this.master.connect(comp);
-      comp.connect(this.ctx.destination);
+      comp.connect(ctx.destination);
+      /* catena: ingresso → taglio bassi → saturazione → equalizzazione → cassa */
+      const a = this.amp = {
+        hp: ctx.createBiquadFilter(), pre: ctx.createGain(), shaper: ctx.createWaveShaper(),
+        post: ctx.createGain(), low: ctx.createBiquadFilter(), mid: ctx.createBiquadFilter(),
+        high: ctx.createBiquadFilter(), cab: ctx.createBiquadFilter(), cab2: ctx.createBiquadFilter()
+      };
+      a.hp.type = 'highpass'; a.hp.frequency.value = 80;
+      a.low.type = 'lowshelf'; a.low.frequency.value = 200; a.low.gain.value = 2;
+      a.mid.type = 'peaking'; a.mid.frequency.value = 800; a.mid.Q.value = 0.8;
+      a.high.type = 'highshelf'; a.high.frequency.value = 2500;
+      a.cab.type = 'lowpass'; a.cab.Q.value = 0.8;
+      a.cab2.type = 'peaking'; a.cab2.frequency.value = 2200; a.cab2.Q.value = 1.2; a.cab2.gain.value = 3;
+      a.shaper.oversample = '4x';
+      a.hp.connect(a.pre); a.pre.connect(a.shaper); a.shaper.connect(a.post);
+      a.post.connect(a.low); a.low.connect(a.mid); a.mid.connect(a.high); a.high.connect(a.cab); a.cab.connect(a.cab2);
+      a.cab2.connect(this.master);
+      this.guitar = ctx.createGain();
+      this.setTone();
     }
     if (this.ctx.state === 'suspended') this.ctx.resume();
     return this.ctx;
+  },
+  setTone() {
+    if (!this.ctx) return;
+    try { this.guitar.disconnect(); } catch (e) {}
+    const p = AMPS[S.tone];
+    if (!p) { this.guitar.connect(this.master); return; }
+    const a = this.amp, k = p.drive, n = 2048, curve = new Float32Array(n);
+    for (let i = 0; i < n; i++) { const x = i / (n - 1) * 2 - 1; curve[i] = Math.tanh(k * x) / Math.tanh(k); }
+    a.shaper.curve = curve;
+    a.pre.gain.value = 1;
+    a.post.gain.value = p.post;
+    a.mid.gain.value = p.mid;
+    a.high.gain.value = p.high;
+    a.cab.frequency.value = p.cab;
+    this.guitar.connect(a.hp);
   }
 };
 /* Suono di corda pizzicata (Karplus-Strong) */
 const ksCache = new Map();
 function ksBuffer(ctx, freq, dur) {
-  const key = freq.toFixed(2) + '|' + dur;
+  const electric = S.tone !== 'acoustic';
+  const key = freq.toFixed(2) + '|' + dur + '|' + (electric ? 'e' : 'a');
   let b = ksCache.get(key);
   if (b) return b;
   const sr = ctx.sampleRate, len = Math.floor(sr * dur);
@@ -1019,8 +1075,16 @@ function ksBuffer(ctx, freq, dur) {
   const N = Math.max(2, Math.round(sr / freq + 0.5));
   const ring = new Float32Array(N);
   let p = 0;
-  for (let i = 0; i < N; i++) { p = p * 0.35 + (Math.random() * 2 - 1) * 0.65; ring[i] = p; }
-  const decay = freq < 150 ? 0.9985 : freq < 400 ? 0.997 : 0.995;
+  const soft = electric ? 0.15 : 0.35;
+  for (let i = 0; i < N; i++) { p = p * soft + (Math.random() * 2 - 1) * (1 - soft); ring[i] = p; }
+  if (electric) {
+    /* plettro vicino al ponte: filtro a pettine sull'eccitazione, timbro più "elettrico" */
+    const M = Math.max(1, Math.round(N * 0.13)), src = ring.slice();
+    for (let i = 0; i < N; i++) ring[i] = src[i] - src[(i - M + N) % N];
+  }
+  const decay = electric
+    ? (freq < 150 ? 0.9993 : freq < 400 ? 0.9987 : 0.9975)
+    : (freq < 150 ? 0.9985 : freq < 400 ? 0.997 : 0.995);
   let idx = 0;
   for (let i = 0; i < len; i++) {
     const nx = idx + 1 === N ? 0 : idx + 1;
@@ -1042,7 +1106,7 @@ function pluck(freq, when, gain, dur) {
   src.buffer = ksBuffer(ctx, freq, dur || 2);
   const g = ctx.createGain();
   g.gain.value = gain == null ? 0.5 : gain;
-  src.connect(g); g.connect(AE.master);
+  src.connect(g); g.connect(AE.guitar);
   src.start(when || ctx.currentTime);
   return src;
 }
@@ -2014,6 +2078,19 @@ $('#setVibrate').addEventListener('click', e => {
   S.vibrate = !S.vibrate; save();
   e.currentTarget.setAttribute('aria-checked', String(S.vibrate));
   if (S.vibrate && navigator.vibrate) navigator.vibrate(30);
+});
+if (!AMPS[S.tone] && S.tone !== 'acoustic') S.tone = 'crunch';
+$('#setTone').value = S.tone;
+$('#toneTry').innerHTML = ICON.play;
+$('#setTone').addEventListener('change', e => { S.tone = e.target.value; save(); ksCache.clear(); AE.setTone(); });
+$('#toneTry').addEventListener('click', () => {
+  /* breve riff: accordo di Mi, power chord e una nota */
+  const ctx = AE.get();
+  if (!ctx) return;
+  strum([0, 2, 2, 1, 0, 0]);
+  const t0 = ctx.currentTime + 1.3;
+  [[40, 47, 52], [43, 50, 55], [45, 52, 57]].forEach((ch, i) => ch.forEach(m => pluck(midiToFreq(m), t0 + i * 0.45, 0.35, 0.9)));
+  pluck(midiToFreq(64), t0 + 1.5, 0.45, 1.8);
 });
 $('#setLang').value = S.lang || 'auto';
 $('#setLang').addEventListener('change', e => { S.lang = e.target.value; save(); location.reload(); });
